@@ -33,6 +33,7 @@ namespace Bifrost
         internal static ConfigEntry<bool> QuickTravel = null!;
         internal static ConfigEntry<bool> IgnoreRestrictions = null!;
         internal static ConfigEntry<string> PortalPrefabs = null!;
+        internal static ConfigEntry<bool> OpenOnEnter = null!;
 
         private ConfigEntry<TVal> BindSynced<TVal>(string group, string name, TVal value, string description)
         {
@@ -60,6 +61,9 @@ namespace Bifrost
 
             PortalPrefabs = BindSynced("General", "Portal Prefabs", "portal_wood, portal_stone",
                 "Comma-separated prefab names treated as portals.");
+
+            OpenOnEnter = Config.Bind("General", "Open On Enter", true,
+                "Walking into a portal opens the destination map. Pressing E on the portal always works.");
 
             new Harmony(ModGuid).PatchAll();
         }
@@ -223,6 +227,7 @@ namespace Bifrost
     internal static class PortalGui
     {
         private static bool _open;
+        internal static float SuppressUntil;
         private static Vector3 _sourcePos;
         private static GameObject? _root;
         private static readonly List<KeyValuePair<RectTransform, PortalSync.Entry>> _markers =
@@ -344,8 +349,25 @@ namespace Bifrost
 
             Quaternion rot = Quaternion.Euler(0f, entry.rotY, 0f);
             Vector3 target = entry.pos + rot * Vector3.forward * 1.2f + Vector3.up * 0.5f;
+            SuppressUntil = Time.time + 5f;
             player.TeleportTo(target, rot, true);
             Minimap.instance.SetMapMode(Minimap.MapMode.Small);
+        }
+    }
+
+    // Walking into a portal opens the picker instead of the vanilla tag teleport.
+    // Suppressed right after arrival so the destination portal does not reopen it.
+    [HarmonyPatch(typeof(TeleportWorld), nameof(TeleportWorld.Teleport), typeof(Player))]
+    internal static class TeleportWorld_Teleport_Patch
+    {
+        private static bool Prefix(TeleportWorld __instance, Player player)
+        {
+            if (!BifrostPlugin.Enabled.Value || !BifrostPlugin.OpenOnEnter.Value) return true;
+            if (player == null || player != Player.m_localPlayer) return true;
+            if (player.m_teleporting || Time.time < PortalGui.SuppressUntil) return false;
+            if (Minimap.instance == null || Minimap.instance.m_mode == Minimap.MapMode.Large) return false;
+            PortalGui.Open(__instance);
+            return false;
         }
     }
 
