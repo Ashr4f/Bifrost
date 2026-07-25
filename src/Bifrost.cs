@@ -35,6 +35,7 @@ namespace Bifrost
         internal static ConfigEntry<bool> OpenOnEnter = null!;
         internal static ConfigEntry<bool> HideOtherPins = null!;
         internal static ConfigEntry<KeyboardShortcut> MapToggleKey = null!;
+        internal static ConfigEntry<bool> ShowWorldWhileLoading = null!;
 
         private ConfigEntry<TVal> BindSynced<TVal>(string group, string name, TVal value, string description)
         {
@@ -72,6 +73,9 @@ namespace Bifrost
             MapToggleKey = Config.Bind("General", "Map Toggle Key", new KeyboardShortcut(KeyCode.P),
                 "Key to show or hide every portal on the large map at any time.");
 
+            ShowWorldWhileLoading = Config.Bind("General", "Show World While Loading", false,
+                "If on, the screen is not held black while the destination loads, like QuickTeleport did. Feels faster but shows the half loaded world.");
+
             new Harmony(ModGuid).PatchAll();
         }
 
@@ -87,7 +91,7 @@ namespace Bifrost
 
         private void LateUpdate()
         {
-            if (!Enabled.Value || !QuickTravel.Value) return;
+            if (!Enabled.Value || !QuickTravel.Value || ShowWorldWhileLoading.Value) return;
             Player p = Player.m_localPlayer;
             if (p == null || !p.m_teleporting || Hud.instance == null) return;
             if (ZNetScene.instance == null || ZNetScene.instance.IsAreaReady(p.m_teleportTargetPos)) return;
@@ -390,10 +394,13 @@ namespace Bifrost
 
         // Visual only, per frame, after the vanilla pin update. Other mods can
         // recreate or restamp their pins freely, they just stay off screen
-        // while the picker is open.
-        private static FieldInfo? _namePinField;
-        private static FieldInfo? _nameGoField;
-        private static bool _nameSearched;
+        // while the picker is open. Every GameObject a pin references is
+        // swept generically (icon, name label, checked mark), field names
+        // are never assumed so game updates cannot break the hiding.
+        private static readonly List<FieldInfo> _pinGoFields = new List<FieldInfo>();
+        private static readonly List<KeyValuePair<FieldInfo, FieldInfo>> _pinNestedGoFields =
+            new List<KeyValuePair<FieldInfo, FieldInfo>>();
+        private static bool _fieldsSearched;
 
         internal static void AfterUpdatePins(Minimap map)
         {
@@ -405,25 +412,47 @@ namespace Bifrost
             foreach (Minimap.PinData pin in map.m_pins)
             {
                 if (ours.Contains(pin)) continue;
-                if (pin.m_uiElement != null && pin.m_uiElement.gameObject.activeSelf)
-                    pin.m_uiElement.gameObject.SetActive(false);
-                HideName(pin);
+                HideAllVisuals(pin);
             }
         }
 
-        private static void HideName(Minimap.PinData pin)
+        private static void CachePinFields()
         {
-            if (!_nameSearched)
+            _fieldsSearched = true;
+            foreach (FieldInfo f in typeof(Minimap.PinData).GetFields(AccessTools.all))
             {
-                _nameSearched = true;
-                _namePinField = AccessTools.Field(typeof(Minimap.PinData), "m_NamePinData");
-                if (_namePinField != null)
-                    _nameGoField = AccessTools.Field(_namePinField.FieldType, "m_pinNameGameObject");
+                if (typeof(GameObject).IsAssignableFrom(f.FieldType) || typeof(Component).IsAssignableFrom(f.FieldType))
+                {
+                    _pinGoFields.Add(f);
+                }
+                else if (f.FieldType.IsClass && f.FieldType != typeof(string)
+                    && !typeof(UnityEngine.Object).IsAssignableFrom(f.FieldType))
+                {
+                    foreach (FieldInfo nested in f.FieldType.GetFields(AccessTools.all))
+                    {
+                        if (typeof(GameObject).IsAssignableFrom(nested.FieldType) || typeof(Component).IsAssignableFrom(nested.FieldType))
+                            _pinNestedGoFields.Add(new KeyValuePair<FieldInfo, FieldInfo>(f, nested));
+                    }
+                }
             }
-            if (_namePinField == null || _nameGoField == null) return;
-            object? nameData = _namePinField.GetValue(pin);
-            if (nameData != null && _nameGoField.GetValue(nameData) is GameObject go && go.activeSelf)
-                go.SetActive(false);
+        }
+
+        private static void HideAllVisuals(Minimap.PinData pin)
+        {
+            if (!_fieldsSearched) CachePinFields();
+            foreach (FieldInfo f in _pinGoFields) Deactivate(f.GetValue(pin));
+            foreach (KeyValuePair<FieldInfo, FieldInfo> kv in _pinNestedGoFields)
+            {
+                object? mid = kv.Key.GetValue(pin);
+                if (mid != null) Deactivate(kv.Value.GetValue(mid));
+            }
+        }
+
+        private static void Deactivate(object? value)
+        {
+            GameObject? go = value as GameObject;
+            if (go == null && value is Component c) go = c.gameObject;
+            if (go != null && go.activeSelf) go.SetActive(false);
         }
 
         // AddPin's last parameter changed type across game versions (long, then
@@ -561,6 +590,20 @@ namespace Bifrost
         private static bool Prefix()
         {
             return !PortalGui.IsOpen;
+        }
+    }
+
+    // The picker can open while walking into a portal on a cliff edge, so the
+    // character must stop dead: no movement, no jump, no auto run behind the map.
+    [HarmonyPatch(typeof(Player), nameof(Player.SetControls))]
+    internal static class Player_SetControls_Patch
+    {
+        private static void Prefix(Player __instance, ref Vector3 movedir, ref bool jump, ref bool autoRun)
+        {
+            if (!PortalGui.IsOpen || __instance != Player.m_localPlayer) return;
+            movedir = Vector3.zero;
+            jump = false;
+            autoRun = false;
         }
     }
 
