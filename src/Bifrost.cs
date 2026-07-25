@@ -91,6 +91,10 @@ namespace Bifrost
 
         private void LateUpdate()
         {
+            // Last pass of the frame: anything a mod re-activated on the map
+            // since our patches ran gets hidden again before rendering.
+            if (Minimap.instance != null) PortalGui.AfterUpdatePins(Minimap.instance);
+
             if (!Enabled.Value || !QuickTravel.Value || ShowWorldWhileLoading.Value) return;
             Player p = Player.m_localPlayer;
             if (p == null || !p.m_teleporting || Hud.instance == null) return;
@@ -366,7 +370,7 @@ namespace Bifrost
             {
                 if (Vector3.Distance(entry.pos, _sourcePos) < 3f) continue;
                 string name = string.IsNullOrEmpty(entry.tag) ? BifrostPlugin.T("(no name)", "(sans nom)") : entry.tag;
-                Minimap.PinData? pin = AddPinCompat(entry.pos, name);
+                Minimap.PinData? pin = AddPinDirect(entry.pos, name);
                 if (pin != null) _pins.Add(new KeyValuePair<Minimap.PinData, PortalSync.Entry>(pin, entry));
             }
         }
@@ -387,7 +391,7 @@ namespace Bifrost
             foreach (PortalSync.Entry entry in PortalSync.Portals)
             {
                 string name = string.IsNullOrEmpty(entry.tag) ? BifrostPlugin.T("(no name)", "(sans nom)") : entry.tag;
-                Minimap.PinData? pin = AddPinCompat(entry.pos, name);
+                Minimap.PinData? pin = AddPinDirect(entry.pos, name);
                 if (pin != null) _browsePins.Add(pin);
             }
         }
@@ -453,6 +457,52 @@ namespace Bifrost
             GameObject? go = value as GameObject;
             if (go == null && value is Component c) go = c.gameObject;
             if (go != null && go.activeSelf) go.SetActive(false);
+        }
+
+        // Pins are inserted straight into the pin list instead of through
+        // Minimap.AddPin: other mods patch AddPin (exploration reveal around
+        // shared pins, pin syncing) and Bifrost's temporary markers must not
+        // trigger any of that.
+        private static Minimap.PinData? AddPinDirect(Vector3 pos, string name)
+        {
+            if (Minimap.instance == null) return null;
+            try
+            {
+                Minimap.PinData pin = new Minimap.PinData();
+                pin.m_type = Minimap.PinType.Icon4;
+                pin.m_name = name;
+                pin.m_pos = pos;
+                pin.m_save = false;
+                pin.m_checked = false;
+                foreach (Minimap.SpriteData sd in Minimap.instance.m_icons)
+                {
+                    if (sd.m_name == Minimap.PinType.Icon4)
+                    {
+                        pin.m_icon = sd.m_icon;
+                        break;
+                    }
+                }
+                try
+                {
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        FieldInfo? nameField = AccessTools.Field(typeof(Minimap.PinData), "m_NamePinData");
+                        if (nameField != null)
+                            nameField.SetValue(pin, Activator.CreateInstance(nameField.FieldType, pin));
+                    }
+                }
+                catch
+                {
+                    // No label support in this game version, the pin still works.
+                }
+                Minimap.instance.m_pins.Add(pin);
+                return pin;
+            }
+            catch (Exception e)
+            {
+                BifrostPlugin.Log.LogWarning($"Bifrost: direct pin failed ({e.Message}), falling back to AddPin.");
+                return AddPinCompat(pos, name);
+            }
         }
 
         // AddPin's last parameter changed type across game versions (long, then
@@ -559,6 +609,7 @@ namespace Bifrost
         private static void Postfix(Minimap __instance)
         {
             if (!BifrostPlugin.Enabled.Value) return;
+            PortalGui.AfterUpdatePins(__instance);
             if (__instance.m_mode != Minimap.MapMode.Large) return;
             if (Minimap.InTextInput()) return;
             if (BifrostPlugin.MapToggleKey.Value.IsDown()) PortalGui.ToggleBrowse();
