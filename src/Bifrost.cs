@@ -36,6 +36,8 @@ namespace Bifrost
         internal static ConfigEntry<bool> HideOtherPins = null!;
         internal static ConfigEntry<KeyboardShortcut> MapToggleKey = null!;
         internal static ConfigEntry<bool> ShowWorldWhileLoading = null!;
+        internal static ConfigEntry<bool> SkipLoadingObjects = null!;
+        internal static ConfigEntry<bool> SkipLoadingArea = null!;
 
         private ConfigEntry<TVal> BindSynced<TVal>(string group, string name, TVal value, string description)
         {
@@ -75,6 +77,12 @@ namespace Bifrost
 
             ShowWorldWhileLoading = Config.Bind("General", "Show World While Loading", false,
                 "If on, the screen is not held black while the destination loads, like QuickTeleport did. Feels faster but shows the half loaded world.");
+
+            SkipLoadingObjects = Config.Bind("General", "Skip Loading Objects", false,
+                "Arrive once the terrain is ready without waiting for every object. Warning: you can land on a lower floor of a building.");
+
+            SkipLoadingArea = Config.Bind("General", "Skip Loading Area", false,
+                "Instant arrival, the world loads around you. Warning: you arrive before the world exists.");
 
             new Harmony(ModGuid).PatchAll();
         }
@@ -307,6 +315,7 @@ namespace Bifrost
             _browse = false;
             _pins.Clear();
             _browsePins.Clear();
+            _hidden.Clear();
         }
 
         internal static void Open(TeleportWorld portal)
@@ -331,6 +340,7 @@ namespace Bifrost
                 Minimap.instance?.RemovePin(pin.Key);
             }
             _pins.Clear();
+            RestoreHidden();
         }
 
         internal static void ToggleBrowse()
@@ -452,11 +462,35 @@ namespace Bifrost
             }
         }
 
+        // Hidden through a CanvasGroup at alpha 0 instead of SetActive: zooming
+        // and other mods keep reactivating pin elements, but the component we
+        // planted on them survives and keeps them invisible. Restored on close.
+        private static readonly HashSet<CanvasGroup> _hidden = new HashSet<CanvasGroup>();
+
         private static void Deactivate(object? value)
         {
             GameObject? go = value as GameObject;
             if (go == null && value is Component c) go = c.gameObject;
-            if (go != null && go.activeSelf) go.SetActive(false);
+            if (go == null) return;
+            CanvasGroup cg = go.GetComponent<CanvasGroup>();
+            if (cg == null) cg = go.AddComponent<CanvasGroup>();
+            if (cg.alpha != 0f)
+            {
+                cg.alpha = 0f;
+                cg.blocksRaycasts = false;
+            }
+            _hidden.Add(cg);
+        }
+
+        private static void RestoreHidden()
+        {
+            foreach (CanvasGroup cg in _hidden)
+            {
+                if (cg == null) continue;
+                cg.alpha = 1f;
+                cg.blocksRaycasts = true;
+            }
+            _hidden.Clear();
         }
 
         // Pins are inserted straight into the pin list instead of through
@@ -661,7 +695,33 @@ namespace Bifrost
     // ------------------------------------------------------------------
     // Quick travel: skip the artificial wait, never skip the load check.
     // The fade holds until the area is ready, so no unloaded world flash.
+    // The two skip options relax the readiness definition itself, which
+    // drives the vanilla arrival gate, our fast forward and the black
+    // screen all at once.
     // ------------------------------------------------------------------
+    [HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.IsAreaReady))]
+    internal static class ZNetScene_IsAreaReady_Patch
+    {
+        private static void Postfix(Vector3 point, ref bool __result)
+        {
+            if (__result) return;
+            if (!BifrostPlugin.Enabled.Value || !BifrostPlugin.QuickTravel.Value) return;
+            Player p = Player.m_localPlayer;
+            if (p == null || !p.m_teleporting) return;
+            if (Vector3.Distance(point, p.m_teleportTargetPos) > 4f) return;
+
+            if (BifrostPlugin.SkipLoadingArea.Value)
+            {
+                __result = true;
+            }
+            else if (BifrostPlugin.SkipLoadingObjects.Value && ZoneSystem.instance != null
+                && ZoneSystem.instance.IsZoneLoaded(point))
+            {
+                __result = true;
+            }
+        }
+    }
+
     [HarmonyPatch(typeof(Player), "UpdateTeleport")]
     internal static class Player_UpdateTeleport_Patch
     {
