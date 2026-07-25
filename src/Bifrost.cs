@@ -5,9 +5,7 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using ServerSync;
-using TMPro;
 using UnityEngine;
-using UnityEngine.UI;
 
 namespace Bifrost
 {
@@ -177,7 +175,8 @@ namespace Bifrost
     }
 
     // ------------------------------------------------------------------
-    // Portal interaction: press opens the destination map, hold renames.
+    // Portal interaction: press or step in to pick a destination on the
+    // map, hold to rename. Vanilla tag pairing is replaced.
     // ------------------------------------------------------------------
     [HarmonyPatch(typeof(TeleportWorld), nameof(TeleportWorld.Interact))]
     internal static class TeleportWorld_Interact_Patch
@@ -220,118 +219,104 @@ namespace Bifrost
         }
     }
 
+    // Walking into a portal opens the picker instead of the vanilla tag teleport.
+    // Suppressed right after arrival so the destination portal does not reopen it.
+    [HarmonyPatch(typeof(TeleportWorld), nameof(TeleportWorld.Teleport), typeof(Player))]
+    internal static class TeleportWorld_Teleport_Patch
+    {
+        private static bool Prefix(TeleportWorld __instance, Player player)
+        {
+            if (!BifrostPlugin.Enabled.Value || !BifrostPlugin.OpenOnEnter.Value) return true;
+            if (player == null || player != Player.m_localPlayer) return true;
+            if (player.m_teleporting || Time.time < PortalGui.SuppressUntil) return false;
+            if (Minimap.instance == null || Minimap.instance.m_mode == Minimap.MapMode.Large) return false;
+            PortalGui.Open(__instance);
+            return false;
+        }
+    }
+
     // ------------------------------------------------------------------
-    // Destination picker: our own marker layer on top of the large map.
-    // Other mods' pins are never touched, so there is nothing to fight.
+    // Destination picker built on the native pin system. Bifrost adds its
+    // own temporary pins and removes them on close. Pins from other mods
+    // are never touched, so there is nothing to fight.
     // ------------------------------------------------------------------
     internal static class PortalGui
     {
         private static bool _open;
         internal static float SuppressUntil;
         private static Vector3 _sourcePos;
-        private static GameObject? _root;
-        private static readonly List<KeyValuePair<RectTransform, PortalSync.Entry>> _markers =
-            new List<KeyValuePair<RectTransform, PortalSync.Entry>>();
+        private static readonly List<KeyValuePair<Minimap.PinData, PortalSync.Entry>> _pins =
+            new List<KeyValuePair<Minimap.PinData, PortalSync.Entry>>();
+
+        internal static bool IsOpen => _open;
 
         internal static void Open(TeleportWorld portal)
         {
             if (Minimap.instance == null || Player.m_localPlayer == null) return;
             _sourcePos = portal.transform.position;
             _open = true;
-            PortalSync.OnPortalsUpdated = RebuildMarkers;
+            PortalSync.OnPortalsUpdated = RebuildPins;
             PortalSync.Request();
             Minimap.instance.SetMapMode(Minimap.MapMode.Large);
-            RebuildMarkers();
+            RebuildPins();
             Player.m_localPlayer.Message(MessageHud.MessageType.Center,
                 BifrostPlugin.T("Choose a destination portal", "Choisis un portail de destination"));
         }
 
         internal static void Close()
         {
+            if (!_open) return;
             _open = false;
             PortalSync.OnPortalsUpdated = null;
-            if (_root != null)
+            foreach (KeyValuePair<Minimap.PinData, PortalSync.Entry> pin in _pins)
             {
-                UnityEngine.Object.Destroy(_root);
-                _root = null;
+                Minimap.instance?.RemovePin(pin.Key);
             }
-            _markers.Clear();
+            _pins.Clear();
         }
 
-        internal static void OnMapUpdate()
-        {
-            if (!_open) return;
-            if (Minimap.instance == null || Minimap.instance.m_mode != Minimap.MapMode.Large)
-            {
-                Close();
-                return;
-            }
-            foreach (KeyValuePair<RectTransform, PortalSync.Entry> marker in _markers)
-            {
-                if (marker.Key == null) continue;
-                float mx, my;
-                Minimap.instance.WorldToMapPoint(marker.Value.pos, out mx, out my);
-                marker.Key.anchoredPosition = Minimap.instance.MapPointToLocalGuiPos(mx, my, Minimap.instance.m_mapImageLarge);
-            }
-        }
-
-        private static void RebuildMarkers()
+        private static void RebuildPins()
         {
             if (!_open || Minimap.instance == null) return;
-            if (_root != null) UnityEngine.Object.Destroy(_root);
-            _markers.Clear();
-
-            _root = new GameObject("BifrostMarkers", typeof(RectTransform));
-            RectTransform rootRt = _root.GetComponent<RectTransform>();
-            rootRt.SetParent(Minimap.instance.m_mapImageLarge.transform, false);
-            rootRt.anchorMin = Vector2.zero;
-            rootRt.anchorMax = Vector2.one;
-            rootRt.offsetMin = Vector2.zero;
-            rootRt.offsetMax = Vector2.zero;
-
-            Sprite? icon = null;
-            foreach (Minimap.SpriteData sd in Minimap.instance.m_icons)
+            foreach (KeyValuePair<Minimap.PinData, PortalSync.Entry> pin in _pins)
             {
-                if (sd.m_name == Minimap.PinType.Icon4)
-                {
-                    icon = sd.m_icon;
-                    break;
-                }
+                Minimap.instance.RemovePin(pin.Key);
             }
+            _pins.Clear();
 
             foreach (PortalSync.Entry entry in PortalSync.Portals)
             {
                 if (Vector3.Distance(entry.pos, _sourcePos) < 3f) continue;
-
-                GameObject go = new GameObject("BifrostPortal", typeof(RectTransform), typeof(Image), typeof(Button));
-                RectTransform rt = go.GetComponent<RectTransform>();
-                rt.SetParent(rootRt, false);
-                rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
-                rt.sizeDelta = new Vector2(30f, 30f);
-
-                Image img = go.GetComponent<Image>();
-                img.sprite = icon;
-                img.color = Color.white;
-
-                PortalSync.Entry captured = entry;
-                go.GetComponent<Button>().onClick.AddListener(() => Teleport(captured));
-
-                GameObject labelGo = new GameObject("label", typeof(RectTransform), typeof(TextMeshProUGUI));
-                RectTransform lrt = labelGo.GetComponent<RectTransform>();
-                lrt.SetParent(rt, false);
-                lrt.anchorMin = lrt.anchorMax = new Vector2(0.5f, 0f);
-                lrt.anchoredPosition = new Vector2(0f, -12f);
-                lrt.sizeDelta = new Vector2(160f, 20f);
-                TextMeshProUGUI label = labelGo.GetComponent<TextMeshProUGUI>();
-                label.font = Minimap.instance.m_biomeNameLarge.font;
-                label.fontSize = 15f;
-                label.alignment = TextAlignmentOptions.Center;
-                label.raycastTarget = false;
-                label.text = string.IsNullOrEmpty(entry.tag) ? BifrostPlugin.T("(no name)", "(sans nom)") : entry.tag;
-
-                _markers.Add(new KeyValuePair<RectTransform, PortalSync.Entry>(rt, entry));
+                string name = string.IsNullOrEmpty(entry.tag) ? BifrostPlugin.T("(no name)", "(sans nom)") : entry.tag;
+                Minimap.PinData pin = Minimap.instance.AddPin(entry.pos, Minimap.PinType.Icon4, name, false, false, 0L);
+                _pins.Add(new KeyValuePair<Minimap.PinData, PortalSync.Entry>(pin, entry));
             }
-            OnMapUpdate();
+        }
+
+        internal static bool HandleMapClick()
+        {
+            if (!_open || Minimap.instance == null) return false;
+
+            Vector3 click = Minimap.instance.ScreenToWorldPoint(Input.mousePosition);
+            float radius = Minimap.instance.m_removeRadius * (Minimap.instance.m_largeZoom * 2f);
+
+            bool found = false;
+            PortalSync.Entry best = default;
+            float bestDist = float.MaxValue;
+            foreach (KeyValuePair<Minimap.PinData, PortalSync.Entry> pin in _pins)
+            {
+                Vector3 p = pin.Value.pos;
+                float dist = Vector2.Distance(new Vector2(p.x, p.z), new Vector2(click.x, click.z));
+                if (dist < radius && dist < bestDist)
+                {
+                    bestDist = dist;
+                    best = pin.Value;
+                    found = true;
+                }
+            }
+
+            if (found) Teleport(best);
+            return true;
         }
 
         private static void Teleport(PortalSync.Entry entry)
@@ -355,28 +340,31 @@ namespace Bifrost
         }
     }
 
-    // Walking into a portal opens the picker instead of the vanilla tag teleport.
-    // Suppressed right after arrival so the destination portal does not reopen it.
-    [HarmonyPatch(typeof(TeleportWorld), nameof(TeleportWorld.Teleport), typeof(Player))]
-    internal static class TeleportWorld_Teleport_Patch
+    [HarmonyPatch(typeof(Minimap), nameof(Minimap.SetMapMode))]
+    internal static class Minimap_SetMapMode_Patch
     {
-        private static bool Prefix(TeleportWorld __instance, Player player)
+        private static void Postfix(Minimap.MapMode mode)
         {
-            if (!BifrostPlugin.Enabled.Value || !BifrostPlugin.OpenOnEnter.Value) return true;
-            if (player == null || player != Player.m_localPlayer) return true;
-            if (player.m_teleporting || Time.time < PortalGui.SuppressUntil) return false;
-            if (Minimap.instance == null || Minimap.instance.m_mode == Minimap.MapMode.Large) return false;
-            PortalGui.Open(__instance);
-            return false;
+            if (mode != Minimap.MapMode.Large) PortalGui.Close();
         }
     }
 
-    [HarmonyPatch(typeof(Minimap), nameof(Minimap.Update))]
-    internal static class Minimap_Update_Patch
+    [HarmonyPatch(typeof(Minimap), "OnMapLeftClick")]
+    internal static class Minimap_OnMapLeftClick_Patch
     {
-        private static void Postfix()
+        private static bool Prefix()
         {
-            PortalGui.OnMapUpdate();
+            return !PortalGui.HandleMapClick();
+        }
+    }
+
+    // A double click would normally place a player pin, swallow it while picking.
+    [HarmonyPatch(typeof(Minimap), "OnMapDblClick")]
+    internal static class Minimap_OnMapDblClick_Patch
+    {
+        private static bool Prefix()
+        {
+            return !PortalGui.IsOpen;
         }
     }
 
