@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -288,9 +289,51 @@ namespace Bifrost
             {
                 if (Vector3.Distance(entry.pos, _sourcePos) < 3f) continue;
                 string name = string.IsNullOrEmpty(entry.tag) ? BifrostPlugin.T("(no name)", "(sans nom)") : entry.tag;
-                Minimap.PinData pin = Minimap.instance.AddPin(entry.pos, Minimap.PinType.Icon4, name, false, false, 0L);
-                _pins.Add(new KeyValuePair<Minimap.PinData, PortalSync.Entry>(pin, entry));
+                Minimap.PinData? pin = AddPinCompat(entry.pos, name);
+                if (pin != null) _pins.Add(new KeyValuePair<Minimap.PinData, PortalSync.Entry>(pin, entry));
             }
+        }
+
+        // AddPin's last parameter changed type across game versions (long, then
+        // PlatformUserID from an assembly the game libs package does not ship).
+        // Resolve the method at runtime and fill trailing parameters blind.
+        private static MethodInfo? _addPin;
+
+        private static Minimap.PinData? AddPinCompat(Vector3 pos, string name)
+        {
+            if (_addPin == null)
+            {
+                foreach (MethodInfo mi in typeof(Minimap).GetMethods(AccessTools.all))
+                {
+                    ParameterInfo[] ps = mi.GetParameters();
+                    if (mi.Name == "AddPin" && ps.Length >= 5
+                        && ps[0].ParameterType == typeof(Vector3)
+                        && ps[2].ParameterType == typeof(string))
+                    {
+                        _addPin = mi;
+                        break;
+                    }
+                }
+                if (_addPin == null)
+                {
+                    BifrostPlugin.Log.LogWarning("Bifrost: Minimap.AddPin not found.");
+                    return null;
+                }
+            }
+
+            ParameterInfo[] pars = _addPin.GetParameters();
+            object?[] args = new object?[pars.Length];
+            args[0] = pos;
+            args[1] = Minimap.PinType.Icon4;
+            args[2] = name;
+            args[3] = false;
+            args[4] = false;
+            for (int i = 5; i < pars.Length; i++)
+            {
+                Type pt = pars[i].ParameterType;
+                args[i] = pt.IsValueType ? Activator.CreateInstance(pt) : null;
+            }
+            return _addPin.Invoke(Minimap.instance, args) as Minimap.PinData;
         }
 
         internal static bool HandleMapClick()
