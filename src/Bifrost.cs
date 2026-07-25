@@ -33,6 +33,8 @@ namespace Bifrost
         internal static ConfigEntry<bool> IgnoreRestrictions = null!;
         internal static ConfigEntry<string> PortalPrefabs = null!;
         internal static ConfigEntry<bool> OpenOnEnter = null!;
+        internal static ConfigEntry<bool> HideOtherPins = null!;
+        internal static ConfigEntry<KeyboardShortcut> MapToggleKey = null!;
 
         private ConfigEntry<TVal> BindSynced<TVal>(string group, string name, TVal value, string description)
         {
@@ -64,12 +66,42 @@ namespace Bifrost
             OpenOnEnter = Config.Bind("General", "Open On Enter", true,
                 "Walking into a portal opens the destination map. Pressing E on the portal always works.");
 
+            HideOtherPins = Config.Bind("General", "Hide Other Pins", true,
+                "While choosing a destination, only portal pins are shown. Visual only and per frame, other mods keep their pins untouched.");
+
+            MapToggleKey = Config.Bind("General", "Map Toggle Key", new KeyboardShortcut(KeyCode.P),
+                "Key to show or hide every portal on the large map at any time.");
+
             new Harmony(ModGuid).PatchAll();
         }
 
         internal static string T(string en, string fr)
         {
             return Localization.instance != null && Localization.instance.GetSelectedLanguage() == "French" ? fr : en;
+        }
+
+        // Holds the screen black while the destination is still loading, so the
+        // half loaded world is never visible even with all waits removed.
+        private static FieldInfo? _blackField;
+        private static bool _blackSearched;
+
+        private void LateUpdate()
+        {
+            if (!Enabled.Value || !QuickTravel.Value) return;
+            Player p = Player.m_localPlayer;
+            if (p == null || !p.m_teleporting || Hud.instance == null) return;
+            if (ZNetScene.instance == null || ZNetScene.instance.IsAreaReady(p.m_teleportTargetPos)) return;
+
+            if (!_blackSearched)
+            {
+                _blackSearched = true;
+                _blackField = AccessTools.Field(typeof(Hud), "m_blackScreen") ?? AccessTools.Field(typeof(Hud), "m_loadingScreen");
+            }
+            if (_blackField != null && _blackField.GetValue(Hud.instance) is CanvasGroup cg)
+            {
+                cg.alpha = 1f;
+                cg.gameObject.SetActive(true);
+            }
         }
     }
 
@@ -172,6 +204,7 @@ namespace Bifrost
         private static void Postfix()
         {
             PortalSync.RegisterRpcs();
+            PortalGui.ResetAll();
         }
     }
 
@@ -188,6 +221,13 @@ namespace Bifrost
             if (human != Player.m_localPlayer) return true;
 
             if (hold)
+            {
+                __result = true;
+                return false;
+            }
+
+            // Shift+E renames like vanilla, E opens the destination map.
+            if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
             {
                 if (!PrivateArea.CheckAccess(__instance.transform.position))
                 {
@@ -216,7 +256,7 @@ namespace Bifrost
             __result = Localization.instance.Localize(
                 "$piece_portal \"" + tag + "\"\n" +
                 "[<color=yellow><b>$KEY_Use</b></color>] " + BifrostPlugin.T("Choose destination", "Choisir la destination") + "\n" +
-                "[<color=yellow><b>1s $KEY_Use</b></color>] $piece_portal_settag");
+                "[<color=yellow><b>Shift + $KEY_Use</b></color>] $piece_portal_settag");
         }
     }
 
@@ -244,19 +284,29 @@ namespace Bifrost
     internal static class PortalGui
     {
         private static bool _open;
+        private static bool _browse;
         internal static float SuppressUntil;
         private static Vector3 _sourcePos;
         private static readonly List<KeyValuePair<Minimap.PinData, PortalSync.Entry>> _pins =
             new List<KeyValuePair<Minimap.PinData, PortalSync.Entry>>();
+        private static readonly List<Minimap.PinData> _browsePins = new List<Minimap.PinData>();
 
         internal static bool IsOpen => _open;
+
+        internal static void ResetAll()
+        {
+            _open = false;
+            _browse = false;
+            _pins.Clear();
+            _browsePins.Clear();
+        }
 
         internal static void Open(TeleportWorld portal)
         {
             if (Minimap.instance == null || Player.m_localPlayer == null) return;
             _sourcePos = portal.transform.position;
             _open = true;
-            PortalSync.OnPortalsUpdated = RebuildPins;
+            PortalSync.OnPortalsUpdated = OnData;
             PortalSync.Request();
             Minimap.instance.SetMapMode(Minimap.MapMode.Large);
             RebuildPins();
@@ -268,12 +318,35 @@ namespace Bifrost
         {
             if (!_open) return;
             _open = false;
-            PortalSync.OnPortalsUpdated = null;
             foreach (KeyValuePair<Minimap.PinData, PortalSync.Entry> pin in _pins)
             {
                 Minimap.instance?.RemovePin(pin.Key);
             }
             _pins.Clear();
+        }
+
+        internal static void ToggleBrowse()
+        {
+            _browse = !_browse;
+            if (_browse)
+            {
+                PortalSync.OnPortalsUpdated = OnData;
+                PortalSync.Request();
+                RebuildBrowse();
+            }
+            else
+            {
+                ClearBrowse();
+            }
+            Player.m_localPlayer?.Message(MessageHud.MessageType.Center,
+                _browse ? BifrostPlugin.T("Portals shown", "Portails affichés")
+                        : BifrostPlugin.T("Portals hidden", "Portails masqués"));
+        }
+
+        private static void OnData()
+        {
+            if (_open) RebuildPins();
+            if (_browse) RebuildBrowse();
         }
 
         private static void RebuildPins()
@@ -292,6 +365,65 @@ namespace Bifrost
                 Minimap.PinData? pin = AddPinCompat(entry.pos, name);
                 if (pin != null) _pins.Add(new KeyValuePair<Minimap.PinData, PortalSync.Entry>(pin, entry));
             }
+        }
+
+        private static void ClearBrowse()
+        {
+            foreach (Minimap.PinData pin in _browsePins)
+            {
+                Minimap.instance?.RemovePin(pin);
+            }
+            _browsePins.Clear();
+        }
+
+        private static void RebuildBrowse()
+        {
+            if (!_browse || Minimap.instance == null) return;
+            ClearBrowse();
+            foreach (PortalSync.Entry entry in PortalSync.Portals)
+            {
+                string name = string.IsNullOrEmpty(entry.tag) ? BifrostPlugin.T("(no name)", "(sans nom)") : entry.tag;
+                Minimap.PinData? pin = AddPinCompat(entry.pos, name);
+                if (pin != null) _browsePins.Add(pin);
+            }
+        }
+
+        // Visual only, per frame, after the vanilla pin update. Other mods can
+        // recreate or restamp their pins freely, they just stay off screen
+        // while the picker is open.
+        private static FieldInfo? _namePinField;
+        private static FieldInfo? _nameGoField;
+        private static bool _nameSearched;
+
+        internal static void AfterUpdatePins(Minimap map)
+        {
+            if (!_open || !BifrostPlugin.HideOtherPins.Value) return;
+            HashSet<Minimap.PinData> ours = new HashSet<Minimap.PinData>();
+            foreach (KeyValuePair<Minimap.PinData, PortalSync.Entry> kv in _pins) ours.Add(kv.Key);
+            foreach (Minimap.PinData pin in _browsePins) ours.Add(pin);
+
+            foreach (Minimap.PinData pin in map.m_pins)
+            {
+                if (ours.Contains(pin)) continue;
+                if (pin.m_uiElement != null && pin.m_uiElement.gameObject.activeSelf)
+                    pin.m_uiElement.gameObject.SetActive(false);
+                HideName(pin);
+            }
+        }
+
+        private static void HideName(Minimap.PinData pin)
+        {
+            if (!_nameSearched)
+            {
+                _nameSearched = true;
+                _namePinField = AccessTools.Field(typeof(Minimap.PinData), "m_NamePinData");
+                if (_namePinField != null)
+                    _nameGoField = AccessTools.Field(_namePinField.FieldType, "m_pinNameGameObject");
+            }
+            if (_namePinField == null || _nameGoField == null) return;
+            object? nameData = _namePinField.GetValue(pin);
+            if (nameData != null && _nameGoField.GetValue(nameData) is GameObject go && go.activeSelf)
+                go.SetActive(false);
         }
 
         // AddPin's last parameter changed type across game versions (long, then
@@ -392,6 +524,27 @@ namespace Bifrost
         }
     }
 
+    [HarmonyPatch(typeof(Minimap), "Update")]
+    internal static class Minimap_Update_Patch
+    {
+        private static void Postfix(Minimap __instance)
+        {
+            if (!BifrostPlugin.Enabled.Value) return;
+            if (__instance.m_mode != Minimap.MapMode.Large) return;
+            if (Minimap.InTextInput()) return;
+            if (BifrostPlugin.MapToggleKey.Value.IsDown()) PortalGui.ToggleBrowse();
+        }
+    }
+
+    [HarmonyPatch(typeof(Minimap), "UpdatePins")]
+    internal static class Minimap_UpdatePins_Patch
+    {
+        private static void Postfix(Minimap __instance)
+        {
+            PortalGui.AfterUpdatePins(__instance);
+        }
+    }
+
     [HarmonyPatch(typeof(Minimap), "OnMapLeftClick")]
     internal static class Minimap_OnMapLeftClick_Patch
     {
@@ -421,10 +574,16 @@ namespace Bifrost
         private static void Prefix(Player __instance, ref float ___m_teleportTimer)
         {
             if (!BifrostPlugin.Enabled.Value || !BifrostPlugin.QuickTravel.Value) return;
-            if (!__instance.m_teleporting || ___m_teleportTimer >= 8f) return;
-            if (ZNetScene.instance != null && ZNetScene.instance.IsAreaReady(__instance.m_teleportTargetPos))
+            if (!__instance.m_teleporting) return;
+
+            // Skip the fade in wait entirely, arrival is gated on area readiness.
+            if (___m_teleportTimer < 2f) ___m_teleportTimer = 2f;
+
+            // Area ready: fast forward past every remaining vanilla gate.
+            if (___m_teleportTimer < 20f && ZNetScene.instance != null
+                && ZNetScene.instance.IsAreaReady(__instance.m_teleportTargetPos))
             {
-                ___m_teleportTimer = 8f;
+                ___m_teleportTimer = 20f;
             }
         }
     }
