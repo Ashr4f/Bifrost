@@ -4,7 +4,7 @@
     <TargetFramework>net472</TargetFramework>
     <AssemblyName>Bifrost</AssemblyName>
     <RootNamespace>Bifrost</RootNamespace>
-    <Version>1.0.6</Version>
+    <Version>1.0.7</Version>
     <LangVersion>latest</LangVersion>
     <Nullable>annotations</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

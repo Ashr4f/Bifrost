@@ -26,7 +26,8 @@ Two mods inspired Bifrost and both had a flaw it avoids:
 | Ignore Teleport Restrictions | false | If on, non teleportable items no longer block travel. |
 | Portal Prefabs | portal_wood, portal_stone | Prefabs treated as portals. |
 | Open On Enter | true | Walking into a portal opens the destination map. |
-| Hide Other Pins | true | Only portal pins are visible while picking a destination. |
+| Hide Other Pins | true | Resource and custom pins are hidden while picking a destination. |
+| Always Visible Pins | Ping, Shout, Death, Bed, Player, EventArea, RandomEvent, Boss | Pin types never hidden by the picker. |
 | Map Toggle Key | P | Shows or hides every portal on the large map. |
 | Show World While Loading | false | No black screen during loading, shows the half loaded world. |
 | Skip Loading Objects | false | Arrive once terrain is ready. Warning: can land you on a lower floor. |

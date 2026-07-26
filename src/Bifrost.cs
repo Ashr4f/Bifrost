@@ -15,7 +15,7 @@ namespace Bifrost
     {
         public const string ModGuid = "ashr4f.bifrost";
         public const string ModName = "Bifrost";
-        public const string ModVersion = "1.0.6";
+        public const string ModVersion = "1.0.7";
 
         internal static ManualLogSource Log = null!;
 
@@ -34,6 +34,7 @@ namespace Bifrost
         internal static ConfigEntry<string> PortalPrefabs = null!;
         internal static ConfigEntry<bool> OpenOnEnter = null!;
         internal static ConfigEntry<bool> HideOtherPins = null!;
+        internal static ConfigEntry<string> KeepPinTypes = null!;
         internal static ConfigEntry<KeyboardShortcut> MapToggleKey = null!;
         internal static ConfigEntry<bool> ShowWorldWhileLoading = null!;
         internal static ConfigEntry<bool> SkipLoadingObjects = null!;
@@ -71,7 +72,10 @@ namespace Bifrost
                 "Walking into a portal opens the destination map. Pressing E on the portal always works.");
 
             HideOtherPins = Config.Bind("General", "Hide Other Pins", true,
-                "While choosing a destination, only portal pins are shown. Visual only and per frame, other mods keep their pins untouched.");
+                "While choosing a destination, resource and custom pins are hidden so nothing covers the portals. Visual only and per frame, other mods keep their pins untouched.");
+
+            KeepPinTypes = Config.Bind("General", "Always Visible Pins", "Ping, Shout, Death, Bed, Player, EventArea, RandomEvent, Boss",
+                "Comma-separated pin types that stay visible while choosing a destination, so pings, other players and death markers are never hidden.");
 
             MapToggleKey = Config.Bind("General", "Map Toggle Key", new KeyboardShortcut(KeyCode.P),
                 "Key to show or hide every portal on the large map at any time.");
@@ -453,6 +457,7 @@ namespace Bifrost
             foreach (Minimap.PinData pin in map.m_pins)
             {
                 if (ours.Contains(pin)) continue;
+                if (IsAlwaysVisible(pin.m_type)) continue;
                 try
                 {
                     HideAllVisuals(pin);
@@ -462,6 +467,27 @@ namespace Bifrost
                     // One broken pin must never abort the hiding pass.
                 }
             }
+        }
+
+        // Pings, other players and death markers must keep working while the
+        // picker is open, only resource and custom pins are in the way.
+        private static string _keepRaw = "";
+        private static readonly HashSet<string> _keepTypes = new HashSet<string>();
+
+        private static bool IsAlwaysVisible(Minimap.PinType type)
+        {
+            string raw = BifrostPlugin.KeepPinTypes.Value;
+            if (raw != _keepRaw)
+            {
+                _keepRaw = raw;
+                _keepTypes.Clear();
+                foreach (string part in raw.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    string p = part.Trim();
+                    if (p.Length > 0) _keepTypes.Add(p.ToLowerInvariant());
+                }
+            }
+            return _keepTypes.Contains(type.ToString().ToLowerInvariant());
         }
 
         private static void CachePinFields()
@@ -739,13 +765,17 @@ namespace Bifrost
     // ------------------------------------------------------------------
     internal static class TravelGate
     {
+        private const float MaxHold = 12f;
+
         private static float _readySince = -1f;
+        private static float _holdSince = -1f;
         private static Vector3 _target;
         private static bool _wasWarm;
 
         internal static void Reset()
         {
             _readySince = -1f;
+            _holdSince = -1f;
             _target = Vector3.zero;
         }
 
@@ -763,6 +793,7 @@ namespace Bifrost
             {
                 _target = pos;
                 _readySince = -1f;
+                _holdSince = Time.time;
                 // Destination already in memory when leaving: nothing to load,
                 // nothing to wait for. Only cold destinations get the settle delay.
                 _wasWarm = ZoneSystem.instance != null && ZoneSystem.instance.IsZoneLoaded(pos)
@@ -770,6 +801,10 @@ namespace Bifrost
             }
 
             if (_wasWarm) return true;
+
+            // Hard safety net: the view is never held longer than this, whatever
+            // the loading state reports.
+            if (_holdSince > 0f && Time.time - _holdSince >= MaxHold) return true;
 
             bool zoneLoaded = ZoneSystem.instance != null && ZoneSystem.instance.IsZoneLoaded(pos);
             if (!zoneLoaded) return false;
@@ -787,28 +822,16 @@ namespace Bifrost
         }
     }
 
-    // Vanilla completes the teleport on its own timer, which is why holding
-    // the fade was not enough. The completion itself is blocked until the
-    // gate opens.
+    // The teleport itself is never held back: the player must actually move
+    // for the destination to start loading, otherwise the wait deadlocks.
+    // Only the view is held, by the black screen in LateUpdate.
     [HarmonyPatch(typeof(Player), "UpdateTeleport")]
-    internal static class Player_UpdateTeleport_Gate_Patch
+    internal static class Player_Teleport_Reset_Patch
     {
         [HarmonyPriority(Priority.First)]
-        private static void Prefix(Player __instance, ref float ___m_teleportTimer)
+        private static void Prefix(Player __instance)
         {
-            if (!BifrostPlugin.Enabled.Value) return;
-            if (!__instance.m_teleporting)
-            {
-                TravelGate.Reset();
-                return;
-            }
-
-            // Keep the timer just under every vanilla completion threshold
-            // while the destination is not ready enough to be seen.
-            if (___m_teleportTimer > 1.5f && !TravelGate.ArrivalAllowed(__instance))
-            {
-                ___m_teleportTimer = 1.5f;
-            }
+            if (!__instance.m_teleporting) TravelGate.Reset();
         }
     }
 

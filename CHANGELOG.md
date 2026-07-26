@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.7
+
+- Fixed an endless portal loading screen. Holding back the teleport itself deadlocked the wait: the player has to move for the destination to start loading. The teleport now always completes and only the view is held, with a 12 second hard cap.
+- Pings, other players, death and bed markers stay visible while choosing a destination. New setting Always Visible Pins lists the pin types that are never hidden.
+
 ## 1.0.6
 
 - Arrival is now blocked at the source instead of only holding the fade, and waits a settle delay after the destination reports ready. Terrain is generated locally and reports ready almost instantly while server objects are still arriving, which is what caused arrivals in an empty world.
