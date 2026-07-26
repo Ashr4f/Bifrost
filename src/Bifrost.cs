@@ -15,7 +15,7 @@ namespace Bifrost
     {
         public const string ModGuid = "ashr4f.bifrost";
         public const string ModName = "Bifrost";
-        public const string ModVersion = "1.0.2";
+        public const string ModVersion = "1.0.3";
 
         internal static ManualLogSource Log = null!;
 
@@ -76,7 +76,7 @@ namespace Bifrost
                 "Key to show or hide every portal on the large map at any time.");
 
             ShowWorldWhileLoading = Config.Bind("General", "Show World While Loading", false,
-                "If on, the screen is not held black while the destination loads, like QuickTeleport did. Feels faster but shows the half loaded world.");
+                "If on, the screen is not held black while the destination loads. Feels faster but shows the half loaded world.");
 
             SkipLoadingObjects = Config.Bind("General", "Skip Loading Objects", false,
                 "Arrive once the terrain is ready without waiting for every object. Warning: you can land on a lower floor of a building.");
@@ -268,11 +268,32 @@ namespace Bifrost
         {
             if (!BifrostPlugin.Enabled.Value) return;
             string tag = __instance.GetText();
-            if (string.IsNullOrEmpty(tag)) tag = BifrostPlugin.T("(no name)", "(sans nom)");
+            string title = string.IsNullOrEmpty(tag) ? "$piece_portal" : "$piece_portal \"" + tag + "\"";
             __result = Localization.instance.Localize(
-                "$piece_portal \"" + tag + "\"\n" +
+                title + "\n" +
                 "[<color=yellow><b>$KEY_Use</b></color>] " + BifrostPlugin.T("Choose destination", "Choisir la destination") + "\n" +
                 "[<color=yellow><b>Shift + $KEY_Use</b></color>] $piece_portal_settag");
+        }
+    }
+
+    // Portals only light up when they have a tag paired target in vanilla.
+    // Bifrost makes pairing pointless, so the connected state is forced and
+    // every portal keeps its flames and glow.
+    [HarmonyPatch]
+    internal static class TeleportWorld_Target_Patch
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            foreach (string name in new[] { "HaveTarget", "TargetFound" })
+            {
+                MethodInfo? method = AccessTools.Method(typeof(TeleportWorld), name);
+                if (method != null && method.ReturnType == typeof(bool)) yield return method;
+            }
+        }
+
+        private static void Postfix(ref bool __result)
+        {
+            if (BifrostPlugin.Enabled.Value) __result = true;
         }
     }
 
@@ -379,8 +400,7 @@ namespace Bifrost
             foreach (PortalSync.Entry entry in PortalSync.Portals)
             {
                 if (Vector3.Distance(entry.pos, _sourcePos) < 3f) continue;
-                string name = string.IsNullOrEmpty(entry.tag) ? BifrostPlugin.T("(no name)", "(sans nom)") : entry.tag;
-                Minimap.PinData? pin = AddPinDirect(entry.pos, name);
+                Minimap.PinData? pin = AddPinDirect(entry.pos, entry.tag ?? "");
                 if (pin != null) _pins.Add(new KeyValuePair<Minimap.PinData, PortalSync.Entry>(pin, entry));
             }
         }
@@ -400,8 +420,7 @@ namespace Bifrost
             ClearBrowse();
             foreach (PortalSync.Entry entry in PortalSync.Portals)
             {
-                string name = string.IsNullOrEmpty(entry.tag) ? BifrostPlugin.T("(no name)", "(sans nom)") : entry.tag;
-                Minimap.PinData? pin = AddPinDirect(entry.pos, name);
+                Minimap.PinData? pin = AddPinDirect(entry.pos, entry.tag ?? "");
                 if (pin != null) _browsePins.Add(pin);
             }
         }

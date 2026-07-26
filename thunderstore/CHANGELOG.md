@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.3
+
+- Unnamed portals show no label instead of a placeholder.
+- Portals keep their flames and glow: the connected state is forced since tag pairing is pointless with Bifrost.
+
 ## 1.0.2
 
 - Destroyed pin elements no longer crash the hiding pass, which let icons reappear on zoom and fast reopen.
@@ -8,7 +13,7 @@
 
 - Pins are inserted directly, bypassing AddPin patches from other mods.
 - Pin hiding is alpha based and survives zooming and fast reopening.
-- Optional loading skips (objects, area) matching QuickTeleport behavior.
+- Optional loading skips (objects, area).
 - Player is frozen while the picker is open, Shift E renames.
 
 ## 1.0.0

@@ -28,7 +28,7 @@ Two mods inspired Bifrost and both had a flaw it avoids:
 | Open On Enter | true | Walking into a portal opens the destination map. |
 | Hide Other Pins | true | Only portal pins are visible while picking a destination. |
 | Map Toggle Key | P | Shows or hides every portal on the large map. |
-| Show World While Loading | false | QuickTeleport style: no black screen during loading, shows the half loaded world. |
+| Show World While Loading | false | No black screen during loading, shows the half loaded world. |
 | Skip Loading Objects | false | Arrive once terrain is ready. Warning: can land you on a lower floor. |
 | Skip Loading Area | false | Instant arrival, the world loads around you. |
 
