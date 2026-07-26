@@ -15,7 +15,7 @@ namespace Bifrost
     {
         public const string ModGuid = "ashr4f.bifrost";
         public const string ModName = "Bifrost";
-        public const string ModVersion = "1.0.3";
+        public const string ModVersion = "1.0.4";
 
         internal static ManualLogSource Log = null!;
 
@@ -438,9 +438,10 @@ namespace Bifrost
         internal static void AfterUpdatePins(Minimap map)
         {
             if (!_open || !BifrostPlugin.HideOtherPins.Value) return;
+            // Browse pins are hidden too while picking, otherwise they stack
+            // on top of the picker pins. They come back when the picker closes.
             HashSet<Minimap.PinData> ours = new HashSet<Minimap.PinData>();
             foreach (KeyValuePair<Minimap.PinData, PortalSync.Entry> kv in _pins) ours.Add(kv.Key);
-            foreach (Minimap.PinData pin in _browsePins) ours.Add(pin);
 
             foreach (Minimap.PinData pin in map.m_pins)
             {
@@ -676,6 +677,7 @@ namespace Bifrost
             PortalGui.AfterUpdatePins(__instance);
             if (__instance.m_mode != Minimap.MapMode.Large) return;
             if (Minimap.InTextInput()) return;
+            if (PortalGui.IsOpen) return;
             if (BifrostPlugin.MapToggleKey.Value.IsDown()) PortalGui.ToggleBrowse();
         }
     }

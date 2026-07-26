@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.4
+
+- Browse pins are hidden while the picker is open so nothing stacks on the picker pins, and the toggle key is ignored during picking.
+
 ## 1.0.3
 
 - Unnamed portals show no label instead of a placeholder.
