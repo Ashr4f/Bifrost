@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.2
+
+- Destroyed pin elements no longer crash the hiding pass, which let icons reappear on zoom and fast reopen.
+
 ## 1.0.1
 
 - Pins are inserted directly, bypassing AddPin patches from other mods.

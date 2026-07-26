@@ -15,7 +15,7 @@ namespace Bifrost
     {
         public const string ModGuid = "ashr4f.bifrost";
         public const string ModName = "Bifrost";
-        public const string ModVersion = "1.0.1";
+        public const string ModVersion = "1.0.2";
 
         internal static ManualLogSource Log = null!;
 
@@ -426,7 +426,14 @@ namespace Bifrost
             foreach (Minimap.PinData pin in map.m_pins)
             {
                 if (ours.Contains(pin)) continue;
-                HideAllVisuals(pin);
+                try
+                {
+                    HideAllVisuals(pin);
+                }
+                catch
+                {
+                    // One broken pin must never abort the hiding pass.
+                }
             }
         }
 
@@ -469,9 +476,13 @@ namespace Bifrost
 
         private static void Deactivate(object? value)
         {
-            GameObject? go = value as GameObject;
-            if (go == null && value is Component c) go = c.gameObject;
+            // Unity fake null: destroyed objects still exist as managed wrappers,
+            // touching them throws. The implicit bool operator filters them out.
+            GameObject? go = null;
+            if (value is GameObject g && g) go = g;
+            else if (value is Component c && c) go = c.gameObject;
             if (go == null) return;
+
             CanvasGroup cg = go.GetComponent<CanvasGroup>();
             if (cg == null) cg = go.AddComponent<CanvasGroup>();
             if (cg.alpha != 0f)
