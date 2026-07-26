@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.6
+
+- Arrival is now blocked at the source instead of only holding the fade, and waits a settle delay after the destination reports ready. Terrain is generated locally and reports ready almost instantly while server objects are still arriving, which is what caused arrivals in an empty world.
+- New setting Extra Load Wait (1.5s), applied only to destinations that were not loaded when leaving. Already loaded destinations stay instant. Skip Loading Objects and Skip Loading Area bypass the gate as expected.
+
 ## 1.0.5
 
 - Arrival waits for the destination zone to be confirmed loaded over several frames. Previously an unvisited area could be entered while it was still streaming.

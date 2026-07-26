@@ -15,7 +15,7 @@ namespace Bifrost
     {
         public const string ModGuid = "ashr4f.bifrost";
         public const string ModName = "Bifrost";
-        public const string ModVersion = "1.0.5";
+        public const string ModVersion = "1.0.6";
 
         internal static ManualLogSource Log = null!;
 
@@ -38,6 +38,7 @@ namespace Bifrost
         internal static ConfigEntry<bool> ShowWorldWhileLoading = null!;
         internal static ConfigEntry<bool> SkipLoadingObjects = null!;
         internal static ConfigEntry<bool> SkipLoadingArea = null!;
+        internal static ConfigEntry<float> SettleSeconds = null!;
 
         private ConfigEntry<TVal> BindSynced<TVal>(string group, string name, TVal value, string description)
         {
@@ -84,6 +85,10 @@ namespace Bifrost
             SkipLoadingArea = Config.Bind("General", "Skip Loading Area", false,
                 "Instant arrival, the world loads around you. Warning: you arrive before the world exists.");
 
+            SettleSeconds = Config.Bind("General", "Extra Load Wait", 1.5f,
+                "Seconds to keep waiting after a cold destination reports ready. Terrain is generated locally and reports ready almost instantly while buildings and creatures still come from the server, so this short wait is what prevents arriving in an empty world.\n" +
+                "Destinations already loaded when leaving are always instant and never wait. Ignored by the skip options.");
+
             new Harmony(ModGuid).PatchAll();
         }
 
@@ -106,7 +111,9 @@ namespace Bifrost
             if (!Enabled.Value || !QuickTravel.Value || ShowWorldWhileLoading.Value) return;
             Player p = Player.m_localPlayer;
             if (p == null || !p.m_teleporting || Hud.instance == null) return;
-            if (ZNetScene.instance == null || ZNetScene.instance.IsAreaReady(p.m_teleportTargetPos)) return;
+            // Same gate as the arrival itself, so the screen stays black for
+            // exactly as long as the arrival is held back.
+            if (TravelGate.ArrivalAllowed(p)) return;
 
             if (!_blackSearched)
             {
@@ -725,6 +732,87 @@ namespace Bifrost
     }
 
     // ------------------------------------------------------------------
+    // Single gate deciding when arriving is allowed. Terrain is generated
+    // locally so it reports ready almost immediately, while server objects
+    // are still on their way: a settle delay after readiness is what stops
+    // arrivals in an empty world. The skip options relax this on purpose.
+    // ------------------------------------------------------------------
+    internal static class TravelGate
+    {
+        private static float _readySince = -1f;
+        private static Vector3 _target;
+        private static bool _wasWarm;
+
+        internal static void Reset()
+        {
+            _readySince = -1f;
+            _target = Vector3.zero;
+        }
+
+        // True when the destination was already in memory on departure, so the
+        // travel needs no loading time at all.
+        internal static bool IsWarm => _wasWarm;
+
+        internal static bool ArrivalAllowed(Player player)
+        {
+            if (!BifrostPlugin.Enabled.Value) return true;
+            if (BifrostPlugin.SkipLoadingArea.Value) return true;
+
+            Vector3 pos = player.m_teleportTargetPos;
+            if (pos != _target)
+            {
+                _target = pos;
+                _readySince = -1f;
+                // Destination already in memory when leaving: nothing to load,
+                // nothing to wait for. Only cold destinations get the settle delay.
+                _wasWarm = ZoneSystem.instance != null && ZoneSystem.instance.IsZoneLoaded(pos)
+                    && ZNetScene.instance != null && ZNetScene.instance.IsAreaReady(pos);
+            }
+
+            if (_wasWarm) return true;
+
+            bool zoneLoaded = ZoneSystem.instance != null && ZoneSystem.instance.IsZoneLoaded(pos);
+            if (!zoneLoaded) return false;
+
+            if (BifrostPlugin.SkipLoadingObjects.Value) return true;
+
+            if (ZNetScene.instance == null || !ZNetScene.instance.IsAreaReady(pos))
+            {
+                _readySince = -1f;
+                return false;
+            }
+
+            if (_readySince < 0f) _readySince = Time.time;
+            return Time.time - _readySince >= Mathf.Max(0f, BifrostPlugin.SettleSeconds.Value);
+        }
+    }
+
+    // Vanilla completes the teleport on its own timer, which is why holding
+    // the fade was not enough. The completion itself is blocked until the
+    // gate opens.
+    [HarmonyPatch(typeof(Player), "UpdateTeleport")]
+    internal static class Player_UpdateTeleport_Gate_Patch
+    {
+        [HarmonyPriority(Priority.First)]
+        private static void Prefix(Player __instance, ref float ___m_teleportTimer)
+        {
+            if (!BifrostPlugin.Enabled.Value) return;
+            if (!__instance.m_teleporting)
+            {
+                TravelGate.Reset();
+                return;
+            }
+
+            // Keep the timer just under every vanilla completion threshold
+            // while the destination is not ready enough to be seen.
+            if (___m_teleportTimer > 1.5f && !TravelGate.ArrivalAllowed(__instance))
+            {
+                ___m_teleportTimer = 1.5f;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Quick travel: skip the artificial wait, never skip the load check.
     // The fade holds until the area is ready, so no unloaded world flash.
     // The two skip options relax the readiness definition itself, which
@@ -757,32 +845,20 @@ namespace Bifrost
     [HarmonyPatch(typeof(Player), "UpdateTeleport")]
     internal static class Player_UpdateTeleport_Patch
     {
-        private static int _readyFrames;
-
+        [HarmonyPriority(Priority.Last)]
         private static void Prefix(Player __instance, ref float ___m_teleportTimer)
         {
             if (!BifrostPlugin.Enabled.Value || !BifrostPlugin.QuickTravel.Value) return;
-            if (!__instance.m_teleporting)
-            {
-                _readyFrames = 0;
-                return;
-            }
+            if (!__instance.m_teleporting) return;
 
-            // The destination must be requested from the server before the
-            // readiness check means anything, so the early phase is left alone
-            // and only confirmed readiness fast forwards the remaining wait.
-            if (___m_teleportTimer < 1f) return;
+            bool allowed = TravelGate.ArrivalAllowed(__instance);
 
-            bool ready = ZNetScene.instance != null
-                && ZNetScene.instance.IsAreaReady(__instance.m_teleportTargetPos)
-                && ZoneSystem.instance != null
-                && ZoneSystem.instance.IsZoneLoaded(__instance.m_teleportTargetPos);
+            // Cold destinations must be requested from the server before any
+            // readiness check means anything, so their first moment is left
+            // alone. A destination already in memory skips even that.
+            if (!TravelGate.IsWarm && ___m_teleportTimer < 1f) return;
 
-            // Several consecutive ready frames: a single true can happen while
-            // the zone is still streaming, which arrives in an empty world.
-            _readyFrames = ready ? _readyFrames + 1 : 0;
-
-            if (_readyFrames >= 5 && ___m_teleportTimer < 20f) ___m_teleportTimer = 20f;
+            if (___m_teleportTimer < 20f && allowed) ___m_teleportTimer = 20f;
         }
     }
 }
