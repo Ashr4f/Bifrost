@@ -15,7 +15,7 @@ namespace Bifrost
     {
         public const string ModGuid = "ashr4f.bifrost";
         public const string ModName = "Bifrost";
-        public const string ModVersion = "1.0.4";
+        public const string ModVersion = "1.0.5";
 
         internal static ManualLogSource Log = null!;
 
@@ -757,20 +757,32 @@ namespace Bifrost
     [HarmonyPatch(typeof(Player), "UpdateTeleport")]
     internal static class Player_UpdateTeleport_Patch
     {
+        private static int _readyFrames;
+
         private static void Prefix(Player __instance, ref float ___m_teleportTimer)
         {
             if (!BifrostPlugin.Enabled.Value || !BifrostPlugin.QuickTravel.Value) return;
-            if (!__instance.m_teleporting) return;
-
-            // Skip the fade in wait entirely, arrival is gated on area readiness.
-            if (___m_teleportTimer < 2f) ___m_teleportTimer = 2f;
-
-            // Area ready: fast forward past every remaining vanilla gate.
-            if (___m_teleportTimer < 20f && ZNetScene.instance != null
-                && ZNetScene.instance.IsAreaReady(__instance.m_teleportTargetPos))
+            if (!__instance.m_teleporting)
             {
-                ___m_teleportTimer = 20f;
+                _readyFrames = 0;
+                return;
             }
+
+            // The destination must be requested from the server before the
+            // readiness check means anything, so the early phase is left alone
+            // and only confirmed readiness fast forwards the remaining wait.
+            if (___m_teleportTimer < 1f) return;
+
+            bool ready = ZNetScene.instance != null
+                && ZNetScene.instance.IsAreaReady(__instance.m_teleportTargetPos)
+                && ZoneSystem.instance != null
+                && ZoneSystem.instance.IsZoneLoaded(__instance.m_teleportTargetPos);
+
+            // Several consecutive ready frames: a single true can happen while
+            // the zone is still streaming, which arrives in an empty world.
+            _readyFrames = ready ? _readyFrames + 1 : 0;
+
+            if (_readyFrames >= 5 && ___m_teleportTimer < 20f) ___m_teleportTimer = 20f;
         }
     }
 }

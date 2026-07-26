@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.5
+
+- Arrival waits for the destination zone to be confirmed loaded over several frames. Previously an unvisited area could be entered while it was still streaming.
+
 ## 1.0.4
 
 - Browse pins are hidden while the picker is open so nothing stacks on the picker pins, and the toggle key is ignored during picking.

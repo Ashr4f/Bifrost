@@ -1,6 +1,6 @@
 {
   "name": "BifrostPortals",
-  "version_number": "1.0.4",
+  "version_number": "1.0.5",
   "website_url": "https://github.com/Ashr4f/Bifrost",
   "description": "Pick any portal on the map and travel to it. Fast teleports that never show an unloaded world.",
   "dependencies": [
