@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.8
+
+- Faster arrival on an open world destination. The fixed floor before the first readiness check drops from one second to a third, and disappears entirely as soon as the destination zone is loaded. Interiors were already instant because they live in a zone that is loaded before the jump.
+- Extra Load Wait now defaults to half a second instead of one and a half.
+- The loading veil is found again on current game versions. It was looked up under a field name that no longer exists, so the view was not held at all and the log carried a warning at every start. The lookup now tries several names, falls back to a scan, and accepts a canvas group as well as a plain object.
+
 ## 1.0.7
 
 - Fixed an endless portal loading screen. Holding back the teleport itself deadlocked the wait: the player has to move for the destination to start loading. The teleport now always completes and only the view is held, with a 12 second hard cap.

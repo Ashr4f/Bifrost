@@ -15,7 +15,7 @@ namespace Bifrost
     {
         public const string ModGuid = "ashr4f.bifrost";
         public const string ModName = "Bifrost";
-        public const string ModVersion = "1.0.7";
+        public const string ModVersion = "1.0.8";
 
         internal static ManualLogSource Log = null!;
 
@@ -89,7 +89,7 @@ namespace Bifrost
             SkipLoadingArea = Config.Bind("General", "Skip Loading Area", false,
                 "Instant arrival, the world loads around you. Warning: you arrive before the world exists.");
 
-            SettleSeconds = Config.Bind("General", "Extra Load Wait", 1.5f,
+            SettleSeconds = Config.Bind("General", "Extra Load Wait", 0.5f,
                 "Seconds to keep waiting after a cold destination reports ready. Terrain is generated locally and reports ready almost instantly while buildings and creatures still come from the server, so this short wait is what prevents arriving in an empty world.\n" +
                 "Destinations already loaded when leaving are always instant and never wait. Ignored by the skip options.");
 
@@ -122,13 +122,57 @@ namespace Bifrost
             if (!_blackSearched)
             {
                 _blackSearched = true;
-                _blackField = AccessTools.Field(typeof(Hud), "m_blackScreen") ?? AccessTools.Field(typeof(Hud), "m_loadingScreen");
+                _blackField = HudVeil.Find();
             }
-            if (_blackField != null && _blackField.GetValue(Hud.instance) is CanvasGroup cg)
+            if (_blackField == null) return;
+            HudVeil.Keep(_blackField.GetValue(Hud.instance));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The loading veil has changed name and type across game versions, so it
+    // is looked up by hand: no logging from the patch library when a name is
+    // absent, and both a canvas group and a plain object are accepted.
+    // ------------------------------------------------------------------
+    internal static class HudVeil
+    {
+        internal static FieldInfo? Find()
+        {
+            foreach (string name in new[] { "m_blackScreen", "m_loadingScreen", "m_loadingScreenPanel", "m_black" })
             {
-                cg.alpha = 1f;
-                cg.gameObject.SetActive(true);
+                FieldInfo? f = typeof(Hud).GetField(name, AccessTools.all);
+                if (f != null && IsUsable(f.FieldType)) return f;
             }
+            foreach (FieldInfo f in typeof(Hud).GetFields(AccessTools.all))
+            {
+                string n = f.Name.ToLowerInvariant();
+                if ((n.Contains("black") || n.Contains("loading")) && IsUsable(f.FieldType)) return f;
+            }
+            BifrostPlugin.Log.LogWarning("Bifrost: loading veil not found, the world stays visible while a destination loads.");
+            return null;
+        }
+
+        private static bool IsUsable(Type type)
+        {
+            return typeof(CanvasGroup).IsAssignableFrom(type)
+                || typeof(GameObject).IsAssignableFrom(type)
+                || typeof(Component).IsAssignableFrom(type);
+        }
+
+        // The veil is held opaque through a canvas group, added when the object
+        // does not carry one, which survives whatever the game sets meanwhile.
+        internal static void Keep(object? value)
+        {
+            GameObject? go = null;
+            if (value is CanvasGroup group && group) go = group.gameObject;
+            else if (value is GameObject g && g) go = g;
+            else if (value is Component c && c) go = c.gameObject;
+            if (go == null) return;
+
+            if (!go.activeSelf) go.SetActive(true);
+            CanvasGroup cg = go.GetComponent<CanvasGroup>();
+            if (cg == null) cg = go.AddComponent<CanvasGroup>();
+            if (cg.alpha != 1f) cg.alpha = 1f;
         }
     }
 
@@ -868,6 +912,8 @@ namespace Bifrost
     [HarmonyPatch(typeof(Player), "UpdateTeleport")]
     internal static class Player_UpdateTeleport_Patch
     {
+        private const float ColdFloor = 0.35f;
+
         [HarmonyPriority(Priority.Last)]
         private static void Prefix(Player __instance, ref float ___m_teleportTimer)
         {
@@ -876,10 +922,11 @@ namespace Bifrost
 
             bool allowed = TravelGate.ArrivalAllowed(__instance);
 
-            // Cold destinations must be requested from the server before any
-            // readiness check means anything, so their first moment is left
-            // alone. A destination already in memory skips even that.
-            if (!TravelGate.IsWarm && ___m_teleportTimer < 1f) return;
+            // A cold destination must be requested before any readiness check
+            // means anything, so a short floor is kept. It is dropped as soon as
+            // the zone is loaded, and a destination already in memory never waits.
+            if (!TravelGate.IsWarm && ___m_teleportTimer < ColdFloor
+                && !(ZoneSystem.instance != null && ZoneSystem.instance.IsZoneLoaded(__instance.m_teleportTargetPos))) return;
 
             if (___m_teleportTimer < 20f && allowed) ___m_teleportTimer = 20f;
         }
