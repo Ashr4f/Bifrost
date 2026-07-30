@@ -15,7 +15,7 @@ namespace Bifrost
     {
         public const string ModGuid = "ashr4f.bifrost";
         public const string ModName = "Bifrost";
-        public const string ModVersion = "1.0.8";
+        public const string ModVersion = "1.0.9";
 
         internal static ManualLogSource Log = null!;
 
@@ -89,9 +89,9 @@ namespace Bifrost
             SkipLoadingArea = Config.Bind("General", "Skip Loading Area", false,
                 "Instant arrival, the world loads around you. Warning: you arrive before the world exists.");
 
-            SettleSeconds = Config.Bind("General", "Extra Load Wait", 0.5f,
-                "Seconds to keep waiting after a cold destination reports ready. Terrain is generated locally and reports ready almost instantly while buildings and creatures still come from the server, so this short wait is what prevents arriving in an empty world.\n" +
-                "Destinations already loaded when leaving are always instant and never wait. Ignored by the skip options.");
+            SettleSeconds = Config.Bind("General", "Extra Load Wait", 0f,
+                "Extra seconds to wait after the destination has stopped receiving objects from the server. Normally not needed: arrival already waits for the transfer itself, this is only a margin for a slow connection.\n" +
+                "Also used as the plain wait on game versions where the transfer cannot be watched. Destinations already loaded when leaving are always instant.");
 
             new Harmony(ModGuid).PatchAll();
         }
@@ -275,6 +275,7 @@ namespace Bifrost
         private static void Postfix()
         {
             PortalSync.RegisterRpcs();
+            SectorAck.RegisterRpcs();
             PortalGui.ResetAll();
         }
     }
@@ -807,20 +808,176 @@ namespace Bifrost
     // are still on their way: a settle delay after readiness is what stops
     // arrivals in an empty world. The skip options relax this on purpose.
     // ------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Destination handshake. The server is the only one that knows how many
+    // objects a sector really holds, so it is asked directly at departure
+    // instead of guessing from the client side. Arrival then waits for the
+    // transfer to be complete rather than for a timer.
+    // ------------------------------------------------------------------
+    internal static class SectorAck
+    {
+        // Objects are sent by priority and by distance, so the last few can
+        // lag well behind the rest. Close enough is what completes.
+        private const float Ratio = 0.95f;
+
+        private static Vector2i _pending;
+        private static Vector2i _answered;
+        private static bool _waiting;
+        private static int _expected = -1;
+
+        internal static void RegisterRpcs()
+        {
+            ZRoutedRpc.instance.Register<ZPackage>("Bifrost_AskSector", new Action<long, ZPackage>(OnAsk));
+            ZRoutedRpc.instance.Register<ZPackage>("Bifrost_TellSector", new Action<long, ZPackage>(OnTell));
+        }
+
+        internal static void Reset()
+        {
+            _waiting = false;
+            _expected = -1;
+        }
+
+        // Asked as soon as the destination is known. The answer travels while
+        // the terrain is still generating, so it costs no travel time.
+        internal static void Ask(Vector3 pos)
+        {
+            Reset();
+            if (ZNet.instance == null || ZoneSystem.instance == null || ZRoutedRpc.instance == null) return;
+
+            Vector2i zone = ZoneSystem.GetZone(pos);
+            _pending = zone;
+
+            // Solo or host: the count is available right here, no round trip.
+            if (ZNet.instance.IsServer())
+            {
+                _answered = zone;
+                _expected = SectorStream.Count(pos);
+                return;
+            }
+
+            _waiting = true;
+            ZPackage pkg = new ZPackage();
+            pkg.Write(zone.x);
+            pkg.Write(zone.y);
+            ZRoutedRpc.instance.InvokeRoutedRPC(ZRoutedRpc.instance.GetServerPeerID(), "Bifrost_AskSector", pkg);
+        }
+
+        // Number of objects the destination sector holds, or -1 while the
+        // server has not answered, which is also the case when it does not
+        // run Bifrost.
+        internal static int Expected(Vector3 pos)
+        {
+            if (_expected < 0 || ZoneSystem.instance == null) return -1;
+            Vector2i zone = ZoneSystem.GetZone(pos);
+            return zone.x == _answered.x && zone.y == _answered.y ? _expected : -1;
+        }
+
+        internal static bool Complete(Vector3 pos, int known)
+        {
+            int expected = Expected(pos);
+            if (expected < 0) return false;
+            if (expected == 0) return true;
+            return known >= Mathf.CeilToInt(expected * Ratio);
+        }
+
+        private static void OnAsk(long sender, ZPackage pkg)
+        {
+            if (ZNet.instance == null || !ZNet.instance.IsServer() || ZoneSystem.instance == null) return;
+            int x = pkg.ReadInt();
+            int y = pkg.ReadInt();
+            Vector3 pos = ZoneSystem.GetZonePos(new Vector2i(x, y));
+
+            ZPackage answer = new ZPackage();
+            answer.Write(x);
+            answer.Write(y);
+            answer.Write(SectorStream.Count(pos));
+            ZRoutedRpc.instance.InvokeRoutedRPC(sender, "Bifrost_TellSector", answer);
+        }
+
+        private static void OnTell(long sender, ZPackage pkg)
+        {
+            int x = pkg.ReadInt();
+            int y = pkg.ReadInt();
+            int count = pkg.ReadInt();
+            if (!_waiting || x != _pending.x || y != _pending.y) return;
+            _waiting = false;
+            _answered = new Vector2i(x, y);
+            _expected = count;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Counts the objects the client currently knows for a sector. Growing
+    // count means the server is still sending, a stable count means the
+    // destination is delivered. Method names differ between game versions, so
+    // they are probed once and the whole thing degrades to -1 when absent.
+    // ------------------------------------------------------------------
+    internal static class SectorStream
+    {
+        private static bool _searched;
+        private static MethodInfo? _findObjects;
+        private static MethodInfo? _findSector;
+        private static readonly List<ZDO> _buffer = new List<ZDO>();
+
+        internal static int Count(Vector3 pos)
+        {
+            if (!_searched)
+            {
+                _searched = true;
+                foreach (MethodInfo m in typeof(ZDOMan).GetMethods(AccessTools.all))
+                {
+                    ParameterInfo[] ps = m.GetParameters();
+                    if (m.Name == "FindObjects" && ps.Length == 2) _findObjects = m;
+                    else if (m.Name == "FindSectorObjects" && ps.Length >= 4) _findSector = m;
+                }
+                if (_findObjects == null && _findSector == null)
+                    BifrostPlugin.Log.LogWarning("Bifrost: sector contents cannot be watched on this version, arrival falls back to the timed wait.");
+            }
+
+            if (ZDOMan.instance == null || ZoneSystem.instance == null) return -1;
+            if (_findObjects == null && _findSector == null) return -1;
+
+            _buffer.Clear();
+            try
+            {
+                Vector2i zone = ZoneSystem.GetZone(pos);
+                if (_findObjects != null) _findObjects.Invoke(ZDOMan.instance, new object[] { zone, _buffer });
+                else _findSector!.Invoke(ZDOMan.instance, new object[] { zone, 1, 0, _buffer, null });
+            }
+            catch (Exception e)
+            {
+                BifrostPlugin.Log.LogWarning($"Bifrost: sector contents unreadable ({e.Message}), arrival falls back to the timed wait.");
+                _findObjects = null;
+                _findSector = null;
+                return -1;
+            }
+            return _buffer.Count;
+        }
+    }
+
     internal static class TravelGate
     {
         private const float MaxHold = 12f;
+        // The destination is considered delivered once its object count stops
+        // moving. A sector that never receives anything is simply empty.
+        private const float StableSeconds = 0.25f;
+        private const float EmptyGrace = 1.2f;
 
         private static float _readySince = -1f;
         private static float _holdSince = -1f;
         private static Vector3 _target;
         private static bool _wasWarm;
+        private static int _lastCount = -1;
+        private static float _stableSince = -1f;
 
         internal static void Reset()
         {
             _readySince = -1f;
             _holdSince = -1f;
             _target = Vector3.zero;
+            _lastCount = -1;
+            _stableSince = -1f;
+            SectorAck.Reset();
         }
 
         // True when the destination was already in memory on departure, so the
@@ -837,7 +994,10 @@ namespace Bifrost
             {
                 _target = pos;
                 _readySince = -1f;
+                _lastCount = -1;
+                _stableSince = -1f;
                 _holdSince = Time.time;
+                SectorAck.Ask(pos);
                 // Destination already in memory when leaving: nothing to load,
                 // nothing to wait for. Only cold destinations get the settle delay.
                 _wasWarm = ZoneSystem.instance != null && ZoneSystem.instance.IsZoneLoaded(pos)
@@ -860,6 +1020,44 @@ namespace Bifrost
                 _readySince = -1f;
                 return false;
             }
+
+            // IsAreaReady only means "everything I know about is built". On a
+            // sector the client has never received, it knows nothing, so it
+            // answers yes on an empty world. What actually matters is whether
+            // the server is still sending objects for that sector.
+            int count = SectorStream.Count(pos);
+            if (count < 0)
+            {
+                // No way to watch the stream on this game version: fall back to
+                // the plain wait, which is what the setting is there for.
+                if (_readySince < 0f) _readySince = Time.time;
+                return Time.time - _readySince >= Mathf.Max(0f, BifrostPlugin.SettleSeconds.Value);
+            }
+
+            // The server answered how many objects the sector holds, so the
+            // transfer has a real end condition and nothing has to be guessed.
+            int expected = SectorAck.Expected(pos);
+            if (expected >= 0)
+            {
+                if (!SectorAck.Complete(pos, count)) return false;
+                if (_readySince < 0f) _readySince = Time.time;
+                return Time.time - _readySince >= Mathf.Max(0f, BifrostPlugin.SettleSeconds.Value);
+            }
+
+            // No answer: the server does not run Bifrost, or it has not replied
+            // yet. Falls back to watching the count until it stops moving.
+            if (count != _lastCount)
+            {
+                _lastCount = count;
+                _stableSince = Time.time;
+                return false;
+            }
+
+            // Nothing received at all: either the transfer has not started or
+            // the sector is genuinely empty, so a short grace decides.
+            if (count == 0) return Time.time - _holdSince >= EmptyGrace;
+
+            if (Time.time - _stableSince < StableSeconds) return false;
 
             if (_readySince < 0f) _readySince = Time.time;
             return Time.time - _readySince >= Mathf.Max(0f, BifrostPlugin.SettleSeconds.Value);

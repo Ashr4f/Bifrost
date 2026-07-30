@@ -32,7 +32,7 @@ Two mods inspired Bifrost and both had a flaw it avoids:
 | Show World While Loading | false | No black screen during loading, shows the half loaded world. |
 | Skip Loading Objects | false | Arrive once terrain is ready. Warning: can land you on a lower floor. |
 | Skip Loading Area | false | Instant arrival, the world loads around you. |
-| Extra Load Wait | 1.5 | Seconds waited for cold destinations only, prevents arriving in an empty world. Loaded destinations stay instant. |
+| Extra Load Wait              | 0                                                             | Extra margin after the destination stops receiving objects. Arrival already waits for the transfer itself.        |
 
 The portal list comes from the server, so install Bifrost on the server too.
 

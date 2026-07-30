@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.9
+
+- Arrival now has a real completion condition instead of a delay. At departure the client asks the server how many objects the destination sector holds, then waits until it has received them, with a small tolerance because the last objects are sent by priority and can lag behind. On a host or in single player the count is read directly, without a round trip.
+- Without an answer, because the server does not run Bifrost or has not replied yet, arrival watches the object count of the sector and completes once it stops moving. A sector that receives nothing at all is treated as empty after a short grace.
+- This replaces the old behaviour, which trusted the game's area check. That check answers yes as soon as everything the client knows about is built, so on a sector never visited it answered yes on an empty world and the first jump landed in the void.
+- Extra Load Wait now defaults to zero. It is no longer the mechanism, only a margin for a slow connection.
+
 ## 1.0.8
 
 - Faster arrival on an open world destination. The fixed floor before the first readiness check drops from one second to a third, and disappears entirely as soon as the destination zone is loaded. Interiors were already instant because they live in a zone that is loaded before the jump.
